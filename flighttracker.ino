@@ -10,27 +10,30 @@
 #include <TJpg_Decoder.h>
 
 #include "env.h"
+#include "memory_optimizations.h"
 
 // #include <lvgl.h>
 
 WiFiMulti wiFiMulti;
-NetworkClientSecure* client = new NetworkClientSecure;
+NetworkClientSecure client;
 String token;
 TFT_eSPI tft = TFT_eSPI();
 TFT_eSprite spr = TFT_eSprite(&tft);
 
 String icao24;
+String icao24_old;
 JsonDocument flight;  //opensky
 JsonDocument aircraft;
 JsonDocument route;
 
+#define LED_RED 4
+#define LED_GREEN 16
+#define LED_BLUE 17
+
 /*
 TODO
 1. Font. Non ascii characters are displayed funny. It seems like the screen can display them.
-9. Display logic when the image already exists is somehow wrong. The logs spew stupid stuff, but the image is correctly displayed.
 */
-
-
 
 void connect_wifi() {
   WiFi.mode(WIFI_STA);
@@ -52,7 +55,7 @@ void set_clock() {
   time_t nowSecs = time(nullptr);
   while (nowSecs < 8 * 3600 * 2) {
     delay(500);
-    tft.print(F("."));
+    tft.print(".");
     yield();
     nowSecs = time(nullptr);
   }
@@ -65,16 +68,58 @@ void set_clock() {
   tft.print(asctime_r(&timeinfo, buf));
 }
 
+bool draw_to_sprite() {
+  // Draw to sprite
+  uint16_t w = 0, h = 0;
+  TJpgDec.getFsJpgSize(&w, &h, "/aircraft.jpg", LittleFS);
+  // Serial.printf("Jpg size: w %d, h %d", w, h);
+
+  uint16_t target_w, target_h;
+  if (w / 4 <= TFT_HEIGHT && h / 4 <= TFT_WIDTH) {
+    // Serial.println("Scaling by factor of 4");
+    target_w = w / 4;
+    target_h = h / 4;
+    TJpgDec.setJpgScale(4);
+    // Serial.println();
+    // Serial.printf("Trying to create sprite of size w %d h %d", target_w, target_h);
+    // Serial.println();
+    if (spr.createSprite(target_w, target_h) != nullptr) {
+      TJpgDec.drawFsJpg(0, 0, "/aircraft.jpg", LittleFS);
+      return true;
+
+    } else {
+      // Serial.println("Not enough RAM for original sprite!");
+    }
+  }
+
+  // Serial.println("Scaling by factor of 8");
+  target_w = w / 8;
+  target_h = h / 8;
+  TJpgDec.setJpgScale(8);
+  // Serial.println();
+  // Serial.printf("Trying to create sprite of size w %d h %d", target_w, target_h);
+  // Serial.println();
+  if (spr.createSprite(target_w, target_h) != nullptr) {
+    TJpgDec.drawFsJpg(0, 0, "/aircraft.jpg", LittleFS);
+    return true;
+
+  } else {
+    // Serial.println("Not enough RAM for original sprite!");
+    // tft.println("Image could not be displayed (out of memory)");
+    return false;
+  }
+}
+
 void get_image(String url) {
 
-  Serial.println("Trying to get image " + url);
+  // Serial.println("Trying to get image " + url);
 
   if (WiFi.status() != WL_CONNECTED) return;
 
   HTTPClient https;
   https.setTimeout(10000);
   https.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);  // The full image URL sends a 301
-  https.begin(url);
+  https.begin(client, url);
 
   int httpCode = https.GET();
 
@@ -82,46 +127,19 @@ void get_image(String url) {
 
     File f = LittleFS.open("/aircraft.jpg", "w");
     if (!f) {
-      Serial.println("File open failed");
+      // Serial.println("File open failed");
       return;
     }
 
     // Stream the data directly to the file
     https.writeToStream(&f);
     f.flush();
-    Serial.printf("File size in Flash: %d bytes\n", f.size());
+    // Serial.printf("File size in Flash: %d bytes\n", f.size());
     f.close();
-    Serial.println("Download complete.");
+    // Serial.println("Download complete.");
     https.end();
-
-    // Draw to sprite
-    uint16_t w = 0, h = 0;
-    TJpgDec.getFsJpgSize(&w, &h, "/aircraft.jpg", LittleFS);
-    Serial.printf("Jpg size: w %d, h %d", w, h);
-
-    uint16_t target_w, target_h;
-    if (w / 4 <= TFT_HEIGHT && h / 4 <= TFT_WIDTH) {
-      target_w = w / 4;
-      target_h = h / 4;
-      TJpgDec.setJpgScale(4);
-    } else {
-      target_w = w / 8;
-      target_h = h / 8;
-      TJpgDec.setJpgScale(8);
-    }
-
-    Serial.println();
-    Serial.printf("Trying to create sprite of size w %d h %d", target_w, target_h);
-    Serial.println();
-
-    if (spr.createSprite(target_w, target_h) != nullptr) {
-      TJpgDec.drawFsJpg(0, 0, "/aircraft.jpg", LittleFS);
-
-    } else {
-      Serial.println("Not enough RAM for original sprite!");
-    }
   } else {
-    Serial.printf("[HTTPS] GET... failed, error: %d %s\n", httpCode, https.errorToString(httpCode).c_str());
+    // Serial.printf("[HTTPS] GET... failed, error: %d %s\n", httpCode, https.errorToString(httpCode).c_str());
     https.end();
   }
 }
@@ -129,8 +147,8 @@ void get_image(String url) {
 // Get token for auth to Opensky
 String get_token() {
   HTTPClient https;
-  Serial.print("[HTTPS] Connecting to OpenSky Auth...\n");
-  if (https.begin(*client, "https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token")) {
+  // Serial.print("[HTTPS] Connecting to OpenSky Auth...\n");
+  if (https.begin(client, "https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token")) {
 
     // 1. Set the Required Headers
     https.addHeader("Content-Type", "application/x-www-form-urlencoded");
@@ -142,7 +160,7 @@ String get_token() {
     int httpCode = https.POST(httpRequestData);
 
     if (httpCode > 0) {
-      Serial.printf("[HTTPS] POST... code: %d\n", httpCode);
+      // Serial.printf("[HTTPS] POST... code: %d\n", httpCode);
 
       if (httpCode == HTTP_CODE_OK) {
         String payload = https.getString();
@@ -151,17 +169,17 @@ String get_token() {
         DeserializationError error = deserializeJson(doc, payload);
         if (!error) {
           const char* token = doc["access_token"];
-          Serial.print("Acquired token: ");
-          Serial.println(token);
+          // Serial.print("Acquired token: ");
+          // Serial.println(token);
           https.end();
           return token;
         } else {
-          Serial.print("JSON Parse failed: ");
+          // Serial.print("JSON Parse failed: ");
           Serial.println(error.f_str());
         }
       }
     } else {
-      Serial.printf("[HTTPS] POST... failed, error: %s\n", https.errorToString(httpCode).c_str());
+      // Serial.printf("[HTTPS] POST... failed, error: %s\n", https.errorToString(httpCode).c_str());
     }
     https.end();
   }
@@ -273,22 +291,21 @@ JsonDocument get_opensky() {
   String authHeader = "Bearer " + token;
   // Area above east Budapest
   // Serial.println("https://opensky-network.org/api/states/all?lamin=47.4613&lomin=19.1186&lamax=47.5320&lomax=19.2962&extended=1");
-  // if (https.begin(*client, "https://opensky-network.org/api/states/all?lamin=47.4613&lomin=19.1186&lamax=47.5320&lomax=19.2962&extended=1")) {
-  // Area above Switzerland (test)
-  Serial.println("https://opensky-network.org/api/states/all?lamin=45.8389&lomin=5.9962&lamax=47.8229&lomax=10.5226&extended=1");
-  if (https.begin(*client, "https://opensky-network.org/api/states/all?lamin=45.8389&lomin=5.9962&lamax=47.8229&lomax=10.5226&extended=1")) {
+  if (https.begin(client, "https://opensky-network.org/api/states/all?lamin=47.4613&lomin=19.1186&lamax=47.5320&lomax=19.2962&extended=1")) {
+    // Area above Switzerland (test)
+    // Serial.println("https://opensky-network.org/api/states/all?lamin=45.8389&lomin=5.9962&lamax=47.8229&lomax=10.5226&extended=1");
+    // if (https.begin(client, "https://opensky-network.org/api/states/all?lamin=45.8389&lomin=5.9962&lamax=47.8229&lomax=10.5226&extended=1")) {
     https.addHeader("Authorization", authHeader);
 
     int httpCode = https.GET();
 
     if (httpCode == 200) {
-      Serial.printf("[HTTPS] GET %d\n", httpCode);
+      // Serial.printf("[HTTPS] GET %d\n", httpCode);
       String payload = https.getString();
       JsonDocument doc;
       DeserializationError error = deserializeJson(doc, payload);
 
       if (!error) {
-        Serial.println("Successfully acquired OPENSKY. Payload: ");
         Serial.println(payload);
         return doc;
       } else {
@@ -296,14 +313,14 @@ JsonDocument get_opensky() {
       }
       https.end();
     } else if (httpCode == 401) {
-      Serial.printf("[HTTPS] GET... failed, error: %d %s\n", httpCode, https.errorToString(httpCode).c_str());
-      Serial.println("Token likely expired! Trying to re-acquire...");
+      // Serial.printf("[HTTPS] GET... failed, error: %d %s\n", httpCode, https.errorToString(httpCode).c_str());
+      // Serial.println("Token likely expired! Trying to re-acquire...");
       token.clear();
     } else {
-      Serial.printf("[HTTPS] GET... failed, error: %s\n", https.errorToString(httpCode).c_str());
+      // Serial.printf("[HTTPS] GET... failed, error: %s\n", https.errorToString(httpCode).c_str());
     }
   } else {
-    Serial.printf("[HTTPS] begin() failed)");
+    // Serial.printf("[HTTPS] begin() failed)");
   }
 
   return JsonDocument{};
@@ -330,29 +347,28 @@ JsonDocument get_aircraft(const String& aircraft) {
     }
   */
   HTTPClient https;
-  Serial.println("https://api.adsbdb.com/v0/aircraft/" + aircraft);
-  if (https.begin(*client, "https://api.adsbdb.com/v0/aircraft/" + aircraft)) {
+  // Serial.println("https://api.adsbdb.com/v0/aircraft/" + aircraft);
+  if (https.begin(client, "https://api.adsbdb.com/v0/aircraft/" + aircraft)) {
 
     int httpCode = https.GET();
 
     if (httpCode == 200) {
-      Serial.printf("[HTTPS] GET %d\n", httpCode);
+      // Serial.printf("[HTTPS] GET %d\n", httpCode);
       String payload = https.getString();
       JsonDocument doc;
       DeserializationError error = deserializeJson(doc, payload);
       if (!error) {
-        Serial.println("Successfully acquired AIRCRAFT. Payload: ");
         Serial.println(payload);
         return doc;
       } else {
         Serial.println(error.c_str());
       }
     } else {
-      Serial.printf("[HTTPS] GET... failed, error: %d %s\n", httpCode, https.errorToString(httpCode).c_str());
+      // Serial.printf("[HTTPS] GET... failed, error: %d %s\n", httpCode, https.errorToString(httpCode).c_str());
     }
     https.end();
   } else {
-    Serial.printf("[HTTPS] begin() failed)");
+    // Serial.printf("[HTTPS] begin() failed)");
   }
   return JsonDocument{};
 }
@@ -392,63 +408,68 @@ JsonDocument get_route(const String& callsign) {
                   "icao_code": "KMHT",
                   "latitude": 42.932598,
                   "longitude": -71.435699,
-                  "municipality": "Manchester",
+                  "municipality": "Manchester",opensky_data
                   "name": "Manchester-Boston Regional Airport"
               }
           }
       }
   */
   HTTPClient https;
-  Serial.println("https://api.adsbdb.com/v0/callsign/" + callsign);
-  if (https.begin(*client, "https://api.adsbdb.com/v0/callsign/" + callsign)) {
+  // Serial.println("https://api.adsbdb.com/v0/callsign/" + callsign);
+  if (https.begin(client, "https://api.adsbdb.com/v0/callsign/" + callsign)) {
 
     int httpCode = https.GET();
 
     if (httpCode == 200) {
-      Serial.printf("[HTTPS] GET %d\n", httpCode);
+      // Serial.printf("[HTTPS] GET %d\n", httpCode);
       String payload = https.getString();
       JsonDocument doc;
       DeserializationError error = deserializeJson(doc, payload);
       if (!error) {
-        Serial.println("Successfully acquired ROUTE. Payload: ");
         Serial.println(payload);
         return doc;
       } else {
         Serial.println(error.c_str());
       }
     } else {
-      Serial.printf("[HTTPS] GET... failed, error: %d %s\n", httpCode, https.errorToString(httpCode).c_str());
+      // Serial.printf("[HTTPS] GET... failed, error: %d %s\n", httpCode, https.errorToString(httpCode).c_str());
     }
     https.end();
   } else {
-    Serial.printf("[HTTPS] begin() failed)");
+    // Serial.printf("[HTTPS] begin() failed)");
   }
   return JsonDocument{};
+}
+
+String to_string(const JsonDocument& doc) {
+  if (doc.isNull()) {
+    return "Unknown";
+  }
+  return doc.as<String>();
 }
 
 void display_data() {
   tft.setCursor(0, 0);
   tft.fillScreen(TFT_BLACK);
 
-  String callsign = flight[1];
   tft.print("Callsign: ");
-  tft.println(callsign);
+  tft.println(to_string(flight[1]));
 
-  String country = flight[2];
+
   tft.print("Country: ");
-  tft.println(country);
+  tft.println(to_string(flight[2]));
 
   float altitude = flight[7];
   tft.print("Altitude: ");
   if (altitude < 1.0) {
     tft.println("Unknown");
   } else {
-    tft.println(flight[7].as<String>() + "m");
+    tft.println(to_string(flight[7]) + "m");
   }
 
-  tft.println("Speed: " + flight[9].as<String>() + "m/s");
+  tft.println("Speed: " + to_string(flight[9]) + "m/s");
 
-  tft.println("Direction: " + flight[10].as<String>() + " deg");
+  tft.println("Direction: " + to_string(flight[10]) + " deg");
 
   // this is almost never in the data
   // int category = flight[17];
@@ -477,18 +498,17 @@ void display_data() {
   //   default: Serial.println("Unknown Category"); break;
   // }
 
-  tft.println("Type: " + aircraft["type"].as<String>());
+  tft.println("Type: " + to_string(aircraft["type"]));
 
-  tft.println("Manufacturer: " + aircraft["manufacturer"].as<String>());
+  tft.println("Manufacturer: " + to_string(aircraft["manufacturer"]));
 
-  tft.println("Owner: " + aircraft["registered_owner"].as<String>());
+  tft.println("Owner: " + to_string(aircraft["registered_owner"]));
 
-  tft.println("Airline:" + route["airline"]["name"].as<String>());
+  tft.println("Airline:" + to_string(route["airline"]["name"]));
 
-  tft.println("Origin: " + route["origin"]["name"].as<String>());
+  tft.println("Origin: " + to_string(route["origin"]["name"]));
 
-  tft.println("Destination: " + route["destination"]["name"].as<String>());
-
+  tft.println("Destination: " + to_string(route["destination"]["name"]));
 }
 
 void scale_and_draw(TFT_eSprite& orig) {
@@ -521,36 +541,58 @@ void scale_and_draw(TFT_eSprite& orig) {
   }
 }
 
+bool spr_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) {
+  spr.pushImage(x, y, w, h, bitmap);
+  return true;
+}
+
+bool tft_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) {
+  tft.pushImage(x, y, w, h, bitmap);
+  return true;
+}
+
 void display_image() {
   tft.setCursor(0, 0);
   tft.fillScreen(TFT_BLACK);
 
   if (LittleFS.exists("/aircraft.jpg")) {
-    scale_and_draw(spr);
+    TJpgDec.setCallback(spr_output);
+    if (draw_to_sprite()) {
+      scale_and_draw(spr);
+    }
+    spr.deleteSprite();
   } else {
-    tft.println("No image available");
+    TJpgDec.setCallback(tft_output);
+    TJpgDec.drawFsJpg(0, 0, "/unavailable.jpg", LittleFS);
   }
 }
 
-// TODO: convert to 8 bit color to save on memory. A 320x240 sprite cannot be allocated. Or find some trick to stream-decode a JPEG.
-
-bool tft_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) {
-  // tft.pushImage(x, y, w, h, bitmap);
-  spr.pushImage(x, y, w, h, bitmap);
-
-  return true;
+void wait_for_first_flight() {
+  while (get_opensky()["states"].isNull()) {
+    delay(30000);
+  };
 }
 
 void setup() {
+
   Serial.begin(115200);
 
+  pinMode(LED_RED, OUTPUT);
+  pinMode(LED_GREEN, OUTPUT);
+  pinMode(LED_BLUE, OUTPUT);
+
+  digitalWrite(LED_RED, HIGH);
+  digitalWrite(LED_GREEN, HIGH);
+  digitalWrite(LED_BLUE, HIGH);
+
   tft.begin();
+
   tft.fillScreen(TFT_BLACK);
   tft.setRotation(1);
   tft.setTextSize(2);
 
   if (!LittleFS.begin(true)) {
-    Serial.println("LittleFS initialisation failed!");
+    // Serial.println("LittleFS initialisation failed!");
   }
 
   TJpgDec.setSwapBytes(false);
@@ -561,11 +603,7 @@ void setup() {
 
   set_clock();
 
-  if (client) {
-    client->setInsecure();
-  } else {
-    Serial.print("Client init unsuccessful! Reset required.");
-  }
+  client.setInsecure();
 
   tft.println("Waiting for new flight...");
 
@@ -573,8 +611,13 @@ void setup() {
 
   LittleFS.remove("/aircraft.jpg");
 
-  TJpgDec.setCallback(tft_output);
+  wait_for_first_flight();
 }
+
+// available images on flash:
+// demo.jpg
+// demo_thumb.jpg
+// unavailable.jpg
 
 void loop() {
   if (token.isEmpty()) {
@@ -583,32 +626,38 @@ void loop() {
     return;
   }
 
-  randomSeed(esp_random());
+  // randomSeed(esp_random());
+  // auto index = random(0, 16);  // only for testing, should be 0 normally.
+  auto index = 0;
 
-  auto index = random(0, 16);  // only for testing, should be 0 normally.
+  auto opensky_data = get_opensky();
 
-  auto opensky_data = get_opensky()["states"][index];
+  if (!opensky_data["states"].isNull()) {
+    // Serial.println("New data coming in...");
 
-  if (!opensky_data.isNull() && opensky_data != flight) {
-    // TODO: blink LED here
-    // delete old data
-    LittleFS.remove("/aircraft.jpg");
-    spr.deleteSprite();
-    Serial.println("New data coming in...");
-
-    flight = opensky_data;  // use only the first plane returned for now
+    flight = opensky_data["states"][0];  // use only the first plane returned for now
+    icao24_old = icao24;
     icao24 = flight[0].as<String>();
-    auto callsign = flight[1];
+    auto callsign = flight[1].as<String>();
+    Serial.println(icao24);
+    Serial.println(callsign);
     aircraft = get_aircraft(icao24)["response"]["aircraft"];
     route = get_route(callsign)["response"]["flightroute"];
+    for (auto i = 0; i < 5; i++) {
+      digitalWrite(LED_RED, LOW);
+      delay(200);
+      digitalWrite(LED_RED, HIGH);
+      delay(200);
+    }
   }
 
   display_data();
-  delay(15000);
-  if (!aircraft["url_photo"].isNull()) {
+  delay(10000);
+  if (!aircraft["url_photo"].isNull() && (icao24_old != icao24)) {
     // takes a while, so display fresh data as it processes.
     get_image(aircraft["url_photo"].as<String>());
   }
   display_image();
+
   delay(15000);
 }
