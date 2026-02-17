@@ -1,6 +1,8 @@
 #ifndef MEMORY_OPTIMIZATIONS_H
 #define MEMORY_OPTIMIZATIONS_H
 
+// This should all be done in sdkconfig.h
+
 // https://docs.espressif.com/projects/esp-matter/en/latest/esp32/optimizations.html
 
 #define CONFIG_ENABLE_CHIP_SHELL false
@@ -18,7 +20,7 @@
 #define CONFIG_ESP_SYSTEM_EVENT_QUEUE_SIZE 16
 #define CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE 2048
 
-// Move things to flash?
+// TODO: Move more things to flash?
 
 #define CONFIG_ESP_MAIN_TASK_STACK_SIZE 3072
 #define CONFIG_ESP_TIMER_TASK_STACK_SIZE 2048

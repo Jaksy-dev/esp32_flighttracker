@@ -10,9 +10,9 @@
 #include <TJpg_Decoder.h>
 
 #include "env.h"
-#include "memory_optimizations.h"
+// #include "memory_optimizations.h"
 
-// #include <lvgl.h>
+
 
 WiFiMulti wiFiMulti;
 NetworkClientSecure client;
@@ -21,7 +21,6 @@ TFT_eSPI tft = TFT_eSPI();
 TFT_eSprite spr = TFT_eSprite(&tft);
 
 String icao24;
-String icao24_old;
 JsonDocument flight;  //opensky
 JsonDocument aircraft;
 JsonDocument route;
@@ -32,9 +31,16 @@ JsonDocument route;
 
 /*
 TODO
-1. Font. Non ascii characters are displayed funny. It seems like the screen can display them.
+1. Font. Non ascii characters are not displayed properly.
 */
 
+/* About LVGL
+
+// #include <lvgl.h>
+
+It would be much better to use LVGL, since it has this SJPG addon which could solve the memory issues I am facing. It is likely possible to do an arbitrary resize to 320x240 "in chunks" - i.e. minimal RAM needed.
+
+*/
 void connect_wifi() {
   WiFi.mode(WIFI_STA);
   wiFiMulti.addAP(SSID, PASSWORD);
@@ -79,11 +85,12 @@ bool draw_to_sprite() {
     // Serial.println("Scaling by factor of 4");
     target_w = w / 4;
     target_h = h / 4;
-    TJpgDec.setJpgScale(4);
+
     // Serial.println();
     // Serial.printf("Trying to create sprite of size w %d h %d", target_w, target_h);
     // Serial.println();
     if (spr.createSprite(target_w, target_h) != nullptr) {
+      TJpgDec.setJpgScale(4);
       TJpgDec.drawFsJpg(0, 0, "/aircraft.jpg", LittleFS);
       return true;
 
@@ -95,11 +102,12 @@ bool draw_to_sprite() {
   // Serial.println("Scaling by factor of 8");
   target_w = w / 8;
   target_h = h / 8;
-  TJpgDec.setJpgScale(8);
+
   // Serial.println();
   // Serial.printf("Trying to create sprite of size w %d h %d", target_w, target_h);
   // Serial.println();
   if (spr.createSprite(target_w, target_h) != nullptr) {
+    TJpgDec.setJpgScale(8);
     TJpgDec.drawFsJpg(0, 0, "/aircraft.jpg", LittleFS);
     return true;
 
@@ -563,12 +571,14 @@ void display_image() {
     spr.deleteSprite();
   } else {
     TJpgDec.setCallback(tft_output);
+    TJpgDec.setJpgScale(1);
     TJpgDec.drawFsJpg(0, 0, "/unavailable.jpg", LittleFS);
   }
 }
 
 void wait_for_first_flight() {
   while (get_opensky()["states"].isNull()) {
+    // Needs a reset it it doesn't find an aircraft in 30min (token expires)
     delay(30000);
   };
 }
@@ -577,6 +587,7 @@ void setup() {
 
   Serial.begin(115200);
 
+  // Initialize LED
   pinMode(LED_RED, OUTPUT);
   pinMode(LED_GREEN, OUTPUT);
   pinMode(LED_BLUE, OUTPUT);
@@ -585,19 +596,20 @@ void setup() {
   digitalWrite(LED_GREEN, HIGH);
   digitalWrite(LED_BLUE, HIGH);
 
+  // Init screen
   tft.begin();
-
   tft.fillScreen(TFT_BLACK);
   tft.setRotation(1);
   tft.setTextSize(2);
 
   if (!LittleFS.begin(true)) {
-    // Serial.println("LittleFS initialisation failed!");
+    tft.println("Filesystem initialization failed, reset required.");
   }
+    LittleFS.remove("/aircraft.jpg");
 
   TJpgDec.setSwapBytes(false);
 
-  spr.setColorDepth(16);  // TODO set to 8
+  spr.setColorDepth(16);  // TODO set to 8 in the future?
 
   connect_wifi();
 
@@ -609,15 +621,8 @@ void setup() {
 
   token = get_token();
 
-  LittleFS.remove("/aircraft.jpg");
-
   wait_for_first_flight();
 }
-
-// available images on flash:
-// demo.jpg
-// demo_thumb.jpg
-// unavailable.jpg
 
 void loop() {
   if (token.isEmpty()) {
@@ -626,34 +631,48 @@ void loop() {
     return;
   }
 
-  // randomSeed(esp_random());
-  // auto index = random(0, 16);  // only for testing, should be 0 normally.
-  auto index = 0;
-
   auto opensky_data = get_opensky();
+  auto is_new = false;
 
   if (!opensky_data["states"].isNull()) {
     // Serial.println("New data coming in...");
 
-    flight = opensky_data["states"][0];  // use only the first plane returned for now
-    icao24_old = icao24;
-    icao24 = flight[0].as<String>();
+    // randomSeed(esp_random());
+    // auto index = random(0, 16);  // only for testing, should be 0 normally.
+    auto index = 0;
+    flight = opensky_data["states"][index];  // use only the first plane returned for now
+
+
+    if (icao24 != flight[0].as<String>()) {
+      icao24 = flight[0].as<String>();
+      is_new = true;
+    }
+
+
     auto callsign = flight[1].as<String>();
     Serial.println(icao24);
     Serial.println(callsign);
-    aircraft = get_aircraft(icao24)["response"]["aircraft"];
-    route = get_route(callsign)["response"]["flightroute"];
-    for (auto i = 0; i < 5; i++) {
-      digitalWrite(LED_RED, LOW);
-      delay(200);
-      digitalWrite(LED_RED, HIGH);
-      delay(200);
+
+    if (is_new) {
+      LittleFS.remove("/aircraft.jpg");
+      aircraft.clear();
+      aircraft = get_aircraft(icao24)["response"]["aircraft"];
+      route.clear();
+      route = get_route(callsign)["response"]["flightroute"];
+
+      // Blink LED
+      for (auto i = 0; i < 5; i++) {
+        digitalWrite(LED_RED, LOW);
+        delay(200);
+        digitalWrite(LED_RED, HIGH);
+        delay(200);
+      }
     }
   }
 
   display_data();
   delay(10000);
-  if (!aircraft["url_photo"].isNull() && (icao24_old != icao24)) {
+  if (!aircraft["url_photo"].isNull() && is_new) {
     // takes a while, so display fresh data as it processes.
     get_image(aircraft["url_photo"].as<String>());
   }
